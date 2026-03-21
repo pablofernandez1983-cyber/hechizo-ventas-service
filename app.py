@@ -187,6 +187,39 @@ def ventas():
     })
 
 
+@app.route("/trigger", methods=["POST"])
+def trigger():
+    """Escribe PENDIENTE en el Sheet para que la PC ejecute KNIME."""
+    try:
+        svc = get_sheets_service()
+        svc.spreadsheets().values().update(
+            spreadsheetId=SHEET_ID,
+            range="Trigger!A1",
+            valueInputOption="RAW",
+            body={"values": [["PENDIENTE"]]}
+        ).execute()
+        return jsonify({"ok": True, "msg": "PENDIENTE escrito en Sheet"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/trigger/status")
+def trigger_status():
+    """Lee el estado actual del trigger desde el Sheet."""
+    try:
+        svc = get_sheets_service()
+        res = svc.spreadsheets().values().get(
+            spreadsheetId=SHEET_ID,
+            range="Trigger!A1:A2"
+        ).execute()
+        rows = res.get("values", [])
+        estado = rows[0][0].strip() if rows and rows[0] else ""
+        detalle = rows[1][0].strip() if len(rows) > 1 and rows[1] else ""
+        return jsonify({"ok": True, "estado": estado, "detalle": detalle})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/ping")
 def ping():
     return jsonify({"ok": True, "msg": "Hechizo ventas service running"})
