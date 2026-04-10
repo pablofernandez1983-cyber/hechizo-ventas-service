@@ -232,6 +232,33 @@ def agregar_ordenes_nuevas(svc, orders_tn, ordenes_existentes):
     print(f"[INFO] Agregadas {len(nuevas_filas)} filas ({len(set(f[0] for f in nuevas_filas if f[0]))} órdenes nuevas)")
     return len(nuevas_filas)
 
+def calcular_pendientes(orders_tn):
+    """Calcula órdenes pendientes de pago (pending/unpaid) para hoy y el mes actual."""
+    ahora_ar   = datetime.now(TZ_AR)
+    hoy_str    = ahora_ar.strftime("%Y-%m-%d")
+    mes_prefix = ahora_ar.strftime("%Y-%m")
+
+    pend_hoy = {"total": 0.0, "cantidad": 0}
+    pend_mes = {"cantidad": 0}
+
+    for o in orders_tn:
+        if o.get("status") == "cancelled": continue
+        if o.get("payment_status") not in ("pending", "unpaid"): continue
+        dia = dia_ar(o.get("created_at", ""))
+        if not dia: continue
+        try:
+            total = float(o.get("total", 0))
+        except:
+            total = 0.0
+        if dia == hoy_str:
+            pend_hoy["total"]    += total
+            pend_hoy["cantidad"] += 1
+        if dia.startswith(mes_prefix):
+            pend_mes["cantidad"] += 1
+
+    return pend_hoy, pend_mes
+
+
 def calcular_resumen(orders_tn):
     """Calcula hoy/ayer a partir de las órdenes de Tiendanube (fuente de verdad).
     Solo cuenta órdenes con payment_status paid o authorized, igual que el reporte general."""
@@ -262,8 +289,10 @@ def ventas():
     ahora_ar       = datetime.now(TZ_AR)
     actualizado_en = ahora_ar.strftime("%Y-%m-%dT%H:%M:%S-03:00")
 
-    # 1. Traer órdenes de Tiendanube (últimos 8 días)
-    orders_tn, tn_error = get_orders_tn(days=8)
+    # 1. Traer órdenes de Tiendanube (desde inicio del mes o 8 días, lo que sea mayor)
+    dias_mes = ahora_ar.day  # día del mes actual (1-31)
+    days_to_fetch = max(8, dias_mes + 1)
+    orders_tn, tn_error = get_orders_tn(days=days_to_fetch)
     if tn_error:
         return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
 
@@ -275,10 +304,11 @@ def ventas():
     except Exception as e:
         print(f"[WARN] No se pudo actualizar Sheet: {e}")
 
-    # 3. Calcular resumen hoy/ayer
+    # 3. Calcular resumen hoy/ayer y pendientes
     acum, hoy_str, ayer_str = calcular_resumen(orders_tn)
     hoy_data  = acum[hoy_str]
     ayer_data = acum[ayer_str]
+    pend_hoy, pend_mes = calcular_pendientes(orders_tn)
 
     variacion = None
     if ayer_data["total"] > 0:
@@ -289,6 +319,8 @@ def ventas():
         "actualizadoEn": actualizado_en,
         "hoy":  {"fecha": hoy_str,  "total": round(hoy_data["total"], 2),  "cantidad": hoy_data["cantidad"]},
         "ayer": {"fecha": ayer_str, "total": round(ayer_data["total"], 2), "cantidad": ayer_data["cantidad"]},
+        "pendientes_hoy": {"total": round(pend_hoy["total"], 2), "cantidad": pend_hoy["cantidad"]},
+        "pendientes_mes": {"cantidad": pend_mes["cantidad"]},
         "variacion": variacion,
     })
 
