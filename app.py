@@ -91,6 +91,7 @@ def dia_ar(dt_utc_str):
 def get_orders_tn(days=8):
     desde = (datetime.now(TZ_AR) - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00-03:00")
     orders, page = [], 1
+    tn_error = False
     while True:
         try:
             r = requests.get(f"{BASE_URL}/orders", headers=TN_HEADERS,
@@ -99,12 +100,14 @@ def get_orders_tn(days=8):
             batch = r.json()
         except Exception as e:
             print(f"[ERROR] TN página {page}: {e}")
+            if page == 1:
+                tn_error = True  # Sin datos en absoluto
             break
         if not batch: break
         orders.extend(batch)
         if len(batch) < 200: break
         page += 1
-    return orders
+    return orders, tn_error
 
 def leer_ordenes_sheet(svc):
     """Lee Ventas_diarias y retorna (headers, set de números de orden existentes)"""
@@ -230,15 +233,15 @@ def agregar_ordenes_nuevas(svc, orders_tn, ordenes_existentes):
     return len(nuevas_filas)
 
 def calcular_resumen(orders_tn):
-    """Calcula hoy/ayer a partir de las órdenes de Tiendanube (fuente de verdad)."""
+    """Calcula hoy/ayer a partir de las órdenes de Tiendanube (fuente de verdad).
+    Solo cuenta órdenes con payment_status paid o authorized, igual que el reporte general."""
     ahora_ar = datetime.now(TZ_AR)
     hoy_str  = ahora_ar.strftime("%Y-%m-%d")
     ayer_str = (ahora_ar - timedelta(days=1)).strftime("%Y-%m-%d")
     acum = {hoy_str: {"total": 0.0, "cantidad": 0}, ayer_str: {"total": 0.0, "cantidad": 0}}
 
     for o in orders_tn:
-        if o.get("status") == "cancelled": continue
-        if o.get("payment_status") in ("voided", "refunded"): continue
+        if o.get("payment_status") not in ("paid", "authorized"): continue
         dia = dia_ar(o.get("created_at", ""))
         if dia not in acum: continue
         try:
@@ -260,7 +263,9 @@ def ventas():
     actualizado_en = ahora_ar.strftime("%Y-%m-%dT%H:%M:%S-03:00")
 
     # 1. Traer órdenes de Tiendanube (últimos 8 días)
-    orders_tn = get_orders_tn(days=8)
+    orders_tn, tn_error = get_orders_tn(days=8)
+    if tn_error:
+        return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
 
     # 2. Leer órdenes existentes en Sheet
     try:
