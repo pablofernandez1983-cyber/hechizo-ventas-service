@@ -233,13 +233,15 @@ def agregar_ordenes_nuevas(svc, orders_tn, ordenes_existentes):
     return len(nuevas_filas)
 
 def calcular_pendientes(orders_tn):
-    """Calcula órdenes pendientes de pago (pending/unpaid) para hoy y el mes actual."""
+    """Calcula órdenes pendientes de pago (pending/unpaid) para hoy, ayer y el mes actual."""
     ahora_ar   = datetime.now(TZ_AR)
     hoy_str    = ahora_ar.strftime("%Y-%m-%d")
+    ayer_str   = (ahora_ar - timedelta(days=1)).strftime("%Y-%m-%d")
     mes_prefix = ahora_ar.strftime("%Y-%m")
 
-    pend_hoy = {"total": 0.0, "cantidad": 0}
-    pend_mes = {"cantidad": 0}
+    pend_hoy  = {"total": 0.0, "cantidad": 0}
+    pend_ayer = {"total": 0.0, "cantidad": 0}
+    pend_mes  = {"cantidad": 0}
 
     for o in orders_tn:
         if o.get("status") == "cancelled": continue
@@ -253,10 +255,13 @@ def calcular_pendientes(orders_tn):
         if dia == hoy_str:
             pend_hoy["total"]    += total
             pend_hoy["cantidad"] += 1
+        if dia == ayer_str:
+            pend_ayer["total"]    += total
+            pend_ayer["cantidad"] += 1
         if dia.startswith(mes_prefix):
             pend_mes["cantidad"] += 1
 
-    return pend_hoy, pend_mes
+    return pend_hoy, pend_ayer, pend_mes
 
 
 def calcular_resumen(orders_tn):
@@ -308,7 +313,7 @@ def ventas():
     acum, hoy_str, ayer_str = calcular_resumen(orders_tn)
     hoy_data  = acum[hoy_str]
     ayer_data = acum[ayer_str]
-    pend_hoy, pend_mes = calcular_pendientes(orders_tn)
+    pend_hoy, pend_ayer, pend_mes = calcular_pendientes(orders_tn)
 
     variacion = None
     if ayer_data["total"] > 0:
@@ -319,8 +324,9 @@ def ventas():
         "actualizadoEn": actualizado_en,
         "hoy":  {"fecha": hoy_str,  "total": round(hoy_data["total"], 2),  "cantidad": hoy_data["cantidad"]},
         "ayer": {"fecha": ayer_str, "total": round(ayer_data["total"], 2), "cantidad": ayer_data["cantidad"]},
-        "pendientes_hoy": {"total": round(pend_hoy["total"], 2), "cantidad": pend_hoy["cantidad"]},
-        "pendientes_mes": {"cantidad": pend_mes["cantidad"]},
+        "pendientes_hoy":  {"total": round(pend_hoy["total"],  2), "cantidad": pend_hoy["cantidad"]},
+        "pendientes_ayer": {"total": round(pend_ayer["total"], 2), "cantidad": pend_ayer["cantidad"]},
+        "pendientes_mes":  {"cantidad": pend_mes["cantidad"]},
         "variacion": variacion,
     })
 
