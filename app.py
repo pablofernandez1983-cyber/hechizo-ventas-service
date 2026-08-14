@@ -1,12 +1,20 @@
 """
 Hechizo Bijou - Servicio de Ventas v3
-- GET /ventas  → trae ordenes de Tiendanube, agrega las nuevas a Ventas_diarias, devuelve hoy/ayer
+- GET /ventas  → trae ordenes de Tiendanube, agrega las nuevas a Ventas_diarias,
+                 upsertea a Supabase (tabla 'ventas'/'ventas_detalle') y devuelve hoy/ayer
 - GET /trigger → escribe PENDIENTE en Trigger!A1
 - GET /trigger/status → lee estado del trigger
 - GET /ping    → health check
 
 Ventas_diarias mantiene el mismo formato que escribe KNIME (CSV con todas las columnas).
 Railway solo agrega filas nuevas — no sobreescribe.
+
+El upsert a Supabase usa la misma tabla/esquema que hechizo-reporte-nuevo (que la
+llena vía su reporte completo). Es una escritura idempotente (ON CONFLICT DO UPDATE
+por orden_id) tomada siempre de TiendaNube en vivo, así que no compite con el reporte
+completo — el que corrió más reciente gana, y ambos reflejan la misma verdad. Existe
+para que "ayer" no dependa de que alguien corra el reporte completo después de la
+última venta del día.
 """
 
 from flask import Flask, jsonify
@@ -14,6 +22,7 @@ from flask_cors import CORS
 import requests
 import os
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -33,6 +42,7 @@ SHEET_ID     = os.environ.get("SHEET_ID", "1nUWfj9u0y7M7n2fNG6v55WnIxAedPpBxQZFU
 VENTAS_SHEET = "Ventas_diarias"
 SA_JSON_STR  = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 TZ_AR        = timezone(timedelta(hours=-3))
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 # Columnas que escribe KNIME — Railway usa el mismo orden
 COLUMNAS = [
@@ -87,6 +97,133 @@ def dia_ar(dt_utc_str):
         return dt.strftime("%Y-%m-%d")
     except:
         return ""
+
+def safe_float(v):
+    if v is None or v == "":
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    is_neg = s.startswith('-')
+    s = re.sub(r'[A-Za-z\$\s]', '', s)
+    if is_neg and not s.startswith('-'):
+        s = '-' + s
+    s = s.replace('.', '').replace(',', '.') if s.count(',') == 1 and s.rfind(',') > s.rfind('.') else s.replace(',', '')
+    try:
+        return float(s)
+    except:
+        return 0.0
+
+def es_moto(medio_env):
+    m = (medio_env or "").lower()
+    return any(x in m for x in (
+        "mot", "mensajer", "mile",
+        "entrega rapida", "entrega rápida", "epick", "e-pick",
+    ))
+
+def guardar_ventas_supabase(orders):
+    """Upsertea a Supabase (tablas 'ventas'/'ventas_detalle'), mismo esquema que usa
+    hechizo-reporte-nuevo. Escritura idempotente — no rompe nada si se llama seguido
+    ni si corre en paralelo con el reporte completo (mismos datos, misma clave)."""
+    if not DATABASE_URL or not orders:
+        return
+    try:
+        import psycopg2
+        import psycopg2.extras
+    except Exception as e:
+        print(f"[WARN] psycopg2 no disponible: {e}")
+        return
+
+    rows_ventas, rows_detalle = [], []
+    for o in orders:
+        if o.get("status") == "cancelled": continue
+        if o.get("payment_status") not in ("paid", "authorized"): continue
+        orden_id = o.get("id")
+        if not orden_id: continue
+        try:
+            dt = datetime.fromisoformat(
+                o.get("created_at", "").replace("Z", "+00:00")
+            ).astimezone(TZ_AR)
+        except:
+            continue
+
+        shipping_cust = safe_float(o.get("shipping_cost_customer", 0))
+        tracking  = str(o.get("shipping_tracking_number", "") or "").lower()
+        medio_env = str(o.get("shipping_option", "") or "").lower()
+        if "36000" in tracking:       carrier = "andreani"
+        elif es_moto(medio_env):      carrier = "moto"
+        elif "1978" in tracking:      carrier = "correo"
+        else:                         carrier = "otro"
+        coupons = o.get("coupon") or []
+        coupon_codes = [c.get("code", "") or "" for c in coupons if isinstance(c, dict)]
+        is_may = any("mayo" in c.lower() for c in coupon_codes)
+        customer = o.get("customer") or {}
+        rows_ventas.append((
+            orden_id, dt.date(), dt.year, dt.month,
+            customer.get("name", ""), customer.get("email", ""),
+            safe_float(o.get("subtotal", 0)), safe_float(o.get("discount", 0)),
+            shipping_cust, safe_float(o.get("total", 0)),
+            "mayorista" if is_may else "minorista", carrier,
+            o.get("payment_status", ""), o.get("shipping_status", ""),
+            str(o.get("gateway_name", "") or o.get("gateway", "")),
+            str(o.get("shipping_tracking_number", "") or ""),
+        ))
+
+        for p in (o.get("products") or []):
+            variante_id = p.get("variant_id") or p.get("id")
+            if not variante_id: continue
+            variant_values  = p.get("variant_values") or []
+            variante_nombre = " / ".join(
+                str(v.get("es") or v.get("en") or v.get("pt") or (list(v.values())[0] if v else ""))
+                for v in variant_values if isinstance(v, dict)
+            )
+            rows_detalle.append((
+                orden_id, dt.date(), dt.year, dt.month,
+                p.get("product_id"), variante_id,
+                p.get("name", "") or "", variante_nombre,
+                p.get("sku", "") or "", int(p.get("quantity") or 0),
+                float(p.get("price") or 0),
+            ))
+
+    if not rows_ventas:
+        return
+
+    conn = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=10)
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_batch(cur, """
+                INSERT INTO ventas
+                    (orden_id, fecha, anio, mes, cliente, email,
+                     subtotal, descuento, envio_cobrado, total,
+                     tipo, carrier, estado_pago, estado_envio, medio_pago, tracking)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (orden_id) DO UPDATE SET
+                    subtotal=EXCLUDED.subtotal, descuento=EXCLUDED.descuento,
+                    envio_cobrado=EXCLUDED.envio_cobrado, total=EXCLUDED.total,
+                    tipo=EXCLUDED.tipo, carrier=EXCLUDED.carrier,
+                    estado_pago=EXCLUDED.estado_pago, estado_envio=EXCLUDED.estado_envio,
+                    tracking=EXCLUDED.tracking
+            """, rows_ventas, page_size=200)
+            if rows_detalle:
+                psycopg2.extras.execute_batch(cur, """
+                    INSERT INTO ventas_detalle
+                        (orden_id, fecha, anio, mes, producto_id, variante_id,
+                         producto_nombre, variante_nombre, sku, cantidad, precio_unitario)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (orden_id, variante_id) DO NOTHING
+                """, rows_detalle, page_size=200)
+        conn.commit()
+        print(f"[INFO] Supabase: {len(rows_ventas)} ventas, {len(rows_detalle)} detalle upserteadas")
+    except Exception as e:
+        print(f"[WARN] guardar_ventas_supabase: {e}")
+        if conn:
+            try: conn.rollback()
+            except: pass
+    finally:
+        if conn:
+            try: conn.close()
+            except: pass
 
 def get_orders_tn(days=8):
     desde = (datetime.now(TZ_AR) - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00-03:00")
@@ -308,6 +445,13 @@ def ventas():
         agregar_ordenes_nuevas(svc, orders_tn, ordenes_existentes)
     except Exception as e:
         print(f"[WARN] No se pudo actualizar Sheet: {e}")
+
+    # 2b. Upsert a Supabase — para que "ayer" quede persistido apenas se consulta
+    # en vivo, sin depender de que corra el reporte completo.
+    try:
+        guardar_ventas_supabase(orders_tn)
+    except Exception as e:
+        print(f"[WARN] No se pudo sincronizar Supabase: {e}")
 
     # 3. Calcular resumen hoy/ayer y pendientes
     acum, hoy_str, ayer_str = calcular_resumen(orders_tn)
