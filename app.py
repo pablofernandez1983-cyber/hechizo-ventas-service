@@ -23,6 +23,7 @@ import requests
 import os
 import json
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -369,6 +370,20 @@ def agregar_ordenes_nuevas(svc, orders_tn, ordenes_existentes):
     print(f"[INFO] Agregadas {len(nuevas_filas)} filas ({len(set(f[0] for f in nuevas_filas if f[0]))} órdenes nuevas)")
     return len(nuevas_filas)
 
+def _persistir_orden_tn(orders_tn):
+    """Guarda en Sheet y Supabase. Corre en background, después de responder /ventas."""
+    try:
+        svc = get_svc()
+        _, ordenes_existentes = leer_ordenes_sheet(svc)
+        agregar_ordenes_nuevas(svc, orders_tn, ordenes_existentes)
+    except Exception as e:
+        print(f"[WARN] No se pudo actualizar Sheet: {e}")
+
+    try:
+        guardar_ventas_supabase(orders_tn)
+    except Exception as e:
+        print(f"[WARN] No se pudo sincronizar Supabase: {e}")
+
 def calcular_pendientes(orders_tn):
     """Calcula órdenes pendientes de pago (pending/unpaid) para hoy, ayer y el mes actual."""
     ahora_ar   = datetime.now(TZ_AR)
@@ -438,20 +453,10 @@ def ventas():
     if tn_error:
         return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
 
-    # 2. Leer órdenes existentes en Sheet
-    try:
-        svc = get_svc()
-        _, ordenes_existentes = leer_ordenes_sheet(svc)
-        agregar_ordenes_nuevas(svc, orders_tn, ordenes_existentes)
-    except Exception as e:
-        print(f"[WARN] No se pudo actualizar Sheet: {e}")
-
-    # 2b. Upsert a Supabase — para que "ayer" quede persistido apenas se consulta
-    # en vivo, sin depender de que corra el reporte completo.
-    try:
-        guardar_ventas_supabase(orders_tn)
-    except Exception as e:
-        print(f"[WARN] No se pudo sincronizar Supabase: {e}")
+    # 2. Persistir en Sheet y Supabase en background — no bloquea la respuesta.
+    # El resumen hoy/ayer sale directo de orders_tn (ya lo tenemos), así que no
+    # depende de que termine el guardado.
+    threading.Thread(target=_persistir_orden_tn, args=(orders_tn,), daemon=True).start()
 
     # 3. Calcular resumen hoy/ayer y pendientes
     acum, hoy_str, ayer_str = calcular_resumen(orders_tn)
