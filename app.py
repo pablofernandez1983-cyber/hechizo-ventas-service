@@ -1,7 +1,10 @@
 """
 Hechizo Bijou - Servicio de Ventas v3
-- GET /ventas  → trae ordenes de Tiendanube, agrega las nuevas a Ventas_diarias,
-                 upsertea a Supabase (tabla 'ventas'/'ventas_detalle') y devuelve hoy/ayer
+- GET /ventas     → rápido: trae los últimos días de Tiendanube, agrega las nuevas a
+                     Ventas_diarias, upsertea a Supabase (tabla 'ventas'/'ventas_detalle')
+                     y devuelve hoy/ayer. Sin pendientes_mes (ver /ventas/mes).
+- GET /ventas/mes → lento: trae todo el mes de Tiendanube y devuelve pendientes_mes.
+                     Pensado para llamarse en paralelo con /ventas, sin bloquearlo.
 - GET /trigger → escribe PENDIENTE en Trigger!A1
 - GET /trigger/status → lee estado del trigger
 - GET /ping    → health check
@@ -438,6 +441,8 @@ def calcular_resumen(orders_tn):
 
 @app.route("/ventas")
 def ventas():
+    """Rápido: solo hoy/ayer (3 días de margen por huso horario). Sin pendientes_mes
+    — eso requiere traer todo el mes, que es lo lento. Ver /ventas/mes."""
     if not STORE_ID or not ACCESS_TOKEN:
         return jsonify({"ok": False, "error": "Credenciales TN no configuradas"}), 500
     if not SA_JSON_STR:
@@ -446,23 +451,19 @@ def ventas():
     ahora_ar       = datetime.now(TZ_AR)
     actualizado_en = ahora_ar.strftime("%Y-%m-%dT%H:%M:%S-03:00")
 
-    # 1. Traer órdenes de Tiendanube (desde inicio del mes o 8 días, lo que sea mayor)
-    dias_mes = ahora_ar.day  # día del mes actual (1-31)
-    days_to_fetch = max(8, dias_mes + 1)
-    orders_tn, tn_error = get_orders_tn(days=days_to_fetch)
+    # 1. Traer solo los últimos días de Tiendanube — alcanza para hoy/ayer
+    orders_tn, tn_error = get_orders_tn(days=3)
     if tn_error:
         return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
 
     # 2. Persistir en Sheet y Supabase en background — no bloquea la respuesta.
-    # El resumen hoy/ayer sale directo de orders_tn (ya lo tenemos), así que no
-    # depende de que termine el guardado.
     threading.Thread(target=_persistir_orden_tn, args=(orders_tn,), daemon=True).start()
 
-    # 3. Calcular resumen hoy/ayer y pendientes
+    # 3. Calcular resumen hoy/ayer y pendientes de esos mismos días
     acum, hoy_str, ayer_str = calcular_resumen(orders_tn)
     hoy_data  = acum[hoy_str]
     ayer_data = acum[ayer_str]
-    pend_hoy, pend_ayer, pend_mes = calcular_pendientes(orders_tn)
+    pend_hoy, pend_ayer, _ = calcular_pendientes(orders_tn)  # pend_mes acá sería incompleto
 
     variacion = None
     if ayer_data["total"] > 0:
@@ -475,9 +476,27 @@ def ventas():
         "ayer": {"fecha": ayer_str, "total": round(ayer_data["total"], 2), "cantidad": ayer_data["cantidad"]},
         "pendientes_hoy":  {"total": round(pend_hoy["total"],  2), "cantidad": pend_hoy["cantidad"]},
         "pendientes_ayer": {"total": round(pend_ayer["total"], 2), "cantidad": pend_ayer["cantidad"]},
-        "pendientes_mes":  {"cantidad": pend_mes["cantidad"]},
         "variacion": variacion,
     })
+
+
+@app.route("/ventas/mes")
+def ventas_mes():
+    """Lento: trae todo el mes de Tiendanube para calcular pendientes_mes.
+    Se llama en paralelo con /ventas pero no bloquea su respuesta."""
+    if not STORE_ID or not ACCESS_TOKEN:
+        return jsonify({"ok": False, "error": "Credenciales TN no configuradas"}), 500
+
+    ahora_ar      = datetime.now(TZ_AR)
+    dias_mes      = ahora_ar.day  # día del mes actual (1-31)
+    orders_tn, tn_error = get_orders_tn(days=dias_mes + 1)
+    if tn_error:
+        return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
+
+    threading.Thread(target=_persistir_orden_tn, args=(orders_tn,), daemon=True).start()
+
+    _, _, pend_mes = calcular_pendientes(orders_tn)
+    return jsonify({"ok": True, "pendientes_mes": {"cantidad": pend_mes["cantidad"]}})
 
 
 @app.route("/trigger", methods=["POST"])
