@@ -18,7 +18,9 @@ para que "ayer" no dependa de que alguien corra el reporte completo después de 
 última venta del día.
 """
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
+import hmac
+import time
 from flask_cors import CORS
 import requests
 import os
@@ -31,6 +33,22 @@ from googleapiclient.discovery import build
 
 app = Flask(__name__)
 CORS(app)
+
+
+# /ventas y /ventas/mes exigen la misma clave que el reporte (header X-Web-Key = WEB_PASSWORD).
+# /ping queda abierta (despierta el servidor).
+@app.before_request
+def _auth():
+    if request.method == "OPTIONS" or request.endpoint == "ping":
+        return None
+    password = os.environ.get("WEB_PASSWORD", "")
+    if not password:
+        return jsonify({"ok": False, "error": "WEB_PASSWORD no configurada"}), 503
+    key = request.headers.get("X-Web-Key", "")
+    if not hmac.compare_digest(key.encode(), password.encode()):
+        time.sleep(0.5)
+        return jsonify({"ok": False, "error": "Clave incorrecta"}), 401
+    return None
 
 STORE_ID     = os.environ.get("TIENDANUBE_STORE_ID")
 ACCESS_TOKEN = os.environ.get("TIENDANUBE_ACCESS_TOKEN")
