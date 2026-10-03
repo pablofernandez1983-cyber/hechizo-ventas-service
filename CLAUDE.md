@@ -15,15 +15,13 @@ API Flask que sincroniza órdenes de Tiendanube con Google Sheets para dashboard
 |------|-------------|
 | `GET /ventas` | Rápido (últimos 3 días): sincroniza TN → Sheets/Supabase en background y devuelve hoy/ayer |
 | `GET /ventas/mes` | Lento (todo el mes): devuelve `pendientes_mes`. Se llama en paralelo con `/ventas`, no lo bloquea |
-| `GET /trigger` | Escribe estado en celda Trigger |
-| `GET /trigger/status` | Lee estado del Trigger |
 | `GET /ping` | Health check |
 
 ## Conexión con el ecosistema Hechizo
 
 Escribe en el mismo Sheet que usa todo el ecosistema (`SHEET_ID_GASTOS`):
 - Hoja `Ventas_diarias` → auditoría cruda de órdenes (formato KNIME)
-- Celda `Trigger!A1` → escribe `PENDIENTE` para disparar KNIME (legacy, ya no se usa activamente)
+- `/trigger` y `/trigger/status` (escribían `PENDIENTE` en `Trigger!A1` para KNIME) se eliminaron el 3/10/2026: eran públicos y nadie los usaba
 
 **No se solapa con `hechizo-reporte-nuevo`**: ambos leen Tiendanube directamente, pero para propósitos distintos. Este es dashboard tiempo real (<1s), el reporte es contabilidad mensual (minutos).
 

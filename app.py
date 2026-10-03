@@ -5,8 +5,6 @@ Hechizo Bijou - Servicio de Ventas v3
                      y devuelve hoy/ayer. Sin pendientes_mes (ver /ventas/mes).
 - GET /ventas/mes → lento: trae todo el mes de Tiendanube y devuelve pendientes_mes.
                      Pensado para llamarse en paralelo con /ventas, sin bloquearlo.
-- GET /trigger → escribe PENDIENTE en Trigger!A1
-- GET /trigger/status → lee estado del trigger
 - GET /ping    → health check
 
 Ventas_diarias mantiene el mismo formato que escribe KNIME (CSV con todas las columnas).
@@ -497,34 +495,6 @@ def ventas_mes():
 
     _, _, pend_mes = calcular_pendientes(orders_tn)
     return jsonify({"ok": True, "pendientes_mes": {"cantidad": pend_mes["cantidad"]}})
-
-
-@app.route("/trigger", methods=["POST"])
-def trigger():
-    try:
-        svc = get_svc()
-        svc.spreadsheets().values().update(
-            spreadsheetId=SHEET_ID, range="Trigger!A1",
-            valueInputOption="RAW", body={"values": [["PENDIENTE"]]}
-        ).execute()
-        return jsonify({"ok": True, "msg": "PENDIENTE escrito en Sheet"})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/trigger/status")
-def trigger_status():
-    try:
-        svc = get_svc()
-        res = svc.spreadsheets().values().get(
-            spreadsheetId=SHEET_ID, range="Trigger!A1:A2"
-        ).execute()
-        rows = res.get("values", [])
-        estado  = rows[0][0].strip() if rows and rows[0] else ""
-        detalle = rows[1][0].strip() if len(rows) > 1 and rows[1] else ""
-        return jsonify({"ok": True, "estado": estado, "detalle": detalle})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/ping")
