@@ -238,8 +238,8 @@ def get_orders_tn(days=8):
 # ~1,3 MB de los pedidos completos (que traen productos, direcciones, etc.).
 CAMPOS_RESUMEN = "id,number,status,payment_status,created_at,total"
 
-def get_orders_resumen_tn():
-    desde = (datetime.now(TZ_AR) - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00-03:00")
+def get_orders_resumen_tn(dias=1):
+    desde = (datetime.now(TZ_AR) - timedelta(days=dias)).strftime("%Y-%m-%dT00:00:00-03:00")
     orders, page = [], 1
     while True:
         try:
@@ -363,18 +363,15 @@ def ventas():
 
 @app.route("/ventas/mes")
 def ventas_mes():
-    """Lento: trae todo el mes de Tiendanube para calcular pendientes_mes.
-    Se llama en paralelo con /ventas pero no bloquea su respuesta."""
+    """pendientes_mes: pedidos creados este mes, solo los campos mínimos (antes bajaba
+    los pedidos completos y tardaba 6-11 s). No persiste nada: /ventas ya sincroniza
+    a Supabase todo lo que cambió en los últimos 3 días."""
     if not STORE_ID or not ACCESS_TOKEN:
         return jsonify({"ok": False, "error": "Credenciales TN no configuradas"}), 500
 
-    ahora_ar      = datetime.now(TZ_AR)
-    dias_mes      = ahora_ar.day  # día del mes actual (1-31)
-    orders_tn, tn_error = get_orders_tn(days=dias_mes + 1)
+    orders_tn, tn_error = get_orders_resumen_tn(dias=datetime.now(TZ_AR).day - 1)
     if tn_error:
         return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
-
-    threading.Thread(target=_persistir_orden_tn, args=(orders_tn,), daemon=True).start()
 
     _, _, pend_mes = calcular_pendientes(orders_tn)
     return jsonify({"ok": True, "pendientes_mes": {"cantidad": pend_mes["cantidad"]}})
