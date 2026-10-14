@@ -382,6 +382,59 @@ def ping():
     return jsonify({"ok": True, "msg": "Hechizo ventas service v3 running"})
 
 
+# ── Actualizaciones automáticas (hora Argentina) ─────────────────────────────
+# Este servicio está siempre prendido, así que hace de reloj para todo Hechizo.
+# El reporte (hechizo-reporte-nuevo) se duerme por inactividad: la llamada lo despierta.
+REPORTE_URL = os.environ.get("REPORTE_URL", "https://hechizo-reporte-nuevo-production.up.railway.app")
+HORARIO = {
+    8:  ["ventas"],
+    10: ["resultados"],
+    11: ["ventas"],
+    13: ["ventas"],
+    18: ["ventas"],
+    19: ["stock", "resultados"],   # stock primero: tarda ~25 s y de paso despierta al reporte
+    22: ["ventas"],
+}
+VENTANA_MIN = 15  # si el servicio reinicia a las 8:05, igual corre lo de las 8
+
+def _llamar_reporte(metodo, ruta, timeout):
+    headers = {"X-Web-Key": os.environ.get("WEB_PASSWORD", "")}
+    for intento in range(3):  # el primer intento puede cortarse mientras despierta
+        try:
+            r = requests.request(metodo, REPORTE_URL + ruta, headers=headers, timeout=timeout)
+            print(f"[HORARIO] {metodo} {ruta} -> {r.status_code}")
+            if r.status_code < 500:
+                return
+        except Exception as e:
+            print(f"[HORARIO] {metodo} {ruta} intento {intento + 1}: {e}")
+        time.sleep(30)
+
+TAREAS = {
+    "ventas":     _sincronizar_tn_background,
+    "stock":      lambda: _llamar_reporte("GET", "/stock-data?refresh=1", 240),
+    "resultados": lambda: _llamar_reporte("POST", "/ejecutar", 120),  # 409 = ya estaba corriendo
+}
+
+def _horario_loop():
+    hechos = set()
+    while True:
+        ahora = datetime.now(TZ_AR)
+        clave = (ahora.date(), ahora.hour)
+        if ahora.hour in HORARIO and ahora.minute < VENTANA_MIN and clave not in hechos:
+            hechos.add(clave)
+            for tarea in HORARIO[ahora.hour]:
+                print(f"[HORARIO] {ahora:%d/%m %H:%M} {tarea}")
+                try:
+                    TAREAS[tarea]()
+                except Exception as e:
+                    print(f"[HORARIO] {tarea} falló: {e}")
+        time.sleep(60)
+
+# Solo en Railway (no al importar app.py para probar local). Gunicorn corre 1 worker.
+if os.environ.get("RAILWAY_ENVIRONMENT"):
+    threading.Thread(target=_horario_loop, daemon=True).start()
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)

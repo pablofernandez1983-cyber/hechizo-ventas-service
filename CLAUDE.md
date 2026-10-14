@@ -17,6 +17,18 @@ API Flask que devuelve las ventas de hoy/ayer de Tiendanube en tiempo real para 
 | `GET /ventas/mes` | Lento (todo el mes): devuelve `pendientes_mes`. Se llama en paralelo con `/ventas`, no lo bloquea |
 | `GET /ping` | Health check (única ruta abierta; el resto exige header `X-Web-Key` = `WEB_PASSWORD`) |
 
+## Actualizaciones automáticas (`_horario_loop`, hora Argentina)
+
+Como es el único servicio siempre prendido, hace de reloj de todo Hechizo (hilo dentro del proceso, solo en Railway):
+
+| Hora | Qué hace |
+|------|----------|
+| 8, 11, 13, 18, 22 | Sincroniza los pedidos de TN de los últimos 3 días a Supabase |
+| 10 | `POST /ejecutar` en el reporte (resultados completos) |
+| 19 | `GET /stock-data?refresh=1` (recalcula y guarda el stock en S3) y después `POST /ejecutar` |
+
+El reporte se duerme por inactividad; la llamada lo despierta (3 intentos con 30 s entre medio). Además, la app pide `/ventas` cada vez que se abre.
+
 ## Conexión con el ecosistema Hechizo
 
 - Escribe en Supabase las tablas `ventas`/`ventas_detalle`, igual que `hechizo-reporte-nuevo` (upsert idempotente por `orden_id`).
