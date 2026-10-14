@@ -13,7 +13,7 @@ API Flask que sincroniza órdenes de Tiendanube con Google Sheets para dashboard
 
 | Ruta | Descripción |
 |------|-------------|
-| `GET /ventas` | Rápido (últimos 3 días): sincroniza TN → Sheets/Supabase en background y devuelve hoy/ayer |
+| `GET /ventas` | Rápido (~1 s): hoy/ayer con una consulta liviana a TN (creados desde ayer, solo 6 campos); en background baja los últimos 3 días completos y sincroniza Sheets/Supabase |
 | `GET /ventas/mes` | Lento (todo el mes): devuelve `pendientes_mes`. Se llama en paralelo con `/ventas`, no lo bloquea |
 | `GET /ping` | Health check (única ruta abierta; el resto exige header `X-Web-Key` = `WEB_PASSWORD`) |
 

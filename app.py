@@ -287,6 +287,35 @@ def get_orders_tn(days=8):
         page += 1
     return orders, tn_error
 
+# Para hoy/ayer alcanza con lo creado desde ayer y estos campos: ~20 KB contra
+# ~1,3 MB de los pedidos completos (que traen productos, direcciones, etc.).
+CAMPOS_RESUMEN = "id,number,status,payment_status,created_at,total"
+
+def get_orders_resumen_tn():
+    desde = (datetime.now(TZ_AR) - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00-03:00")
+    orders, page = [], 1
+    while True:
+        try:
+            r = requests.get(f"{BASE_URL}/orders", headers=TN_HEADERS,
+                             params={"page": page, "per_page": 200, "created_at_min": desde,
+                                     "fields": CAMPOS_RESUMEN}, timeout=20)
+            r.raise_for_status()
+            batch = r.json()
+        except Exception as e:
+            print(f"[ERROR] TN resumen página {page}: {e}")
+            return orders, page == 1
+        if not batch: break
+        orders.extend(batch)
+        if len(batch) < 200: break
+        page += 1
+    return orders, False
+
+def _sincronizar_tn_background():
+    """Baja los pedidos completos de los últimos días y los persiste en Sheet/Supabase."""
+    orders_tn, tn_error = get_orders_tn(days=3)
+    if not tn_error:
+        _persistir_orden_tn(orders_tn)
+
 def leer_ordenes_sheet(svc):
     """Lee Ventas_diarias y retorna (headers, set de números de orden existentes)"""
     try:
@@ -478,7 +507,7 @@ def calcular_resumen(orders_tn):
 
 @app.route("/ventas")
 def ventas():
-    """Rápido: solo hoy/ayer (3 días de margen por huso horario). Sin pendientes_mes
+    """Rápido: solo hoy/ayer (pedidos creados desde ayer, campos mínimos). Sin pendientes_mes
     — eso requiere traer todo el mes, que es lo lento. Ver /ventas/mes."""
     if not STORE_ID or not ACCESS_TOKEN:
         return jsonify({"ok": False, "error": "Credenciales TN no configuradas"}), 500
@@ -488,13 +517,13 @@ def ventas():
     ahora_ar       = datetime.now(TZ_AR)
     actualizado_en = ahora_ar.strftime("%Y-%m-%dT%H:%M:%S-03:00")
 
-    # 1. Traer solo los últimos días de Tiendanube — alcanza para hoy/ayer
-    orders_tn, tn_error = get_orders_tn(days=3)
+    # 1. Traer solo lo creado desde ayer, con los campos mínimos — alcanza para hoy/ayer
+    orders_tn, tn_error = get_orders_resumen_tn()
     if tn_error:
         return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
 
-    # 2. Persistir en Sheet y Supabase en background — no bloquea la respuesta.
-    threading.Thread(target=_persistir_orden_tn, args=(orders_tn,), daemon=True).start()
+    # 2. Bajar los pedidos completos y persistir en Sheet y Supabase en background.
+    threading.Thread(target=_sincronizar_tn_background, daemon=True).start()
 
     # 3. Calcular resumen hoy/ayer y pendientes de esos mismos días
     acum, hoy_str, ayer_str = calcular_resumen(orders_tn)
