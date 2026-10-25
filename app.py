@@ -424,7 +424,29 @@ def pendientes():
     estado = _estado_seguimiento(orders)
     lista = [_fila_pendiente(o, estado) for o in orders]
     lista.sort(key=lambda x: x["creado"] or "", reverse=True)
-    return jsonify({"ok": True, "pendientes": lista})
+    return jsonify({"ok": True, "pendientes": lista, "feriados": feriados_ar()})
+
+# Feriados nacionales (incluye puentes no laborables) para el plazo de pago en horas
+# hábiles. Fuente: ArgentinaDatos; se guardan un día. Si falla, la app cuenta solo fines de semana.
+_feriados = {"hasta": 0, "fechas": []}
+
+def feriados_ar():
+    if time.time() < _feriados["hasta"]:
+        return _feriados["fechas"]
+    anio = datetime.now(TZ_AR).year
+    fechas = []
+    for a in (anio - 1, anio, anio + 1):
+        try:
+            # Sin User-Agent propio la API responde 403 a python-requests
+            r = requests.get(f"https://api.argentinadatos.com/v1/feriados/{a}", timeout=10,
+                             headers={"User-Agent": "HechizoBijou/1.0 (hechizobijou@gmail.com)"})
+            r.raise_for_status()
+            fechas += [f["fecha"] for f in r.json() if f.get("fecha")]
+        except Exception as e:
+            print(f"[WARN] feriados {a}: {e}")
+    if fechas:
+        _feriados.update(hasta=time.time() + 86400, fechas=sorted(set(fechas)))
+    return _feriados["fechas"]
 
 def _tn_ordenes(params):
     """Todas las páginas de /orders con esos filtros; None si TN falla. TN responde 404
