@@ -377,6 +377,132 @@ def ventas_mes():
     return jsonify({"ok": True, "pendientes_mes": {"cantidad": pend_mes["cantidad"]}})
 
 
+# ── Pendientes de pago (pantalla para reclamarlos por WhatsApp) ──────────────
+# Lo que se descartó o ya se reclamó vive en Supabase (tabla pendientes_pago) para
+# que se vea igual desde cualquier celu.
+
+def whatsapp_ar(tel):
+    """Teléfono de TN → número para wa.me. Los celulares de Argentina necesitan el 9
+    después del 54 (TN suele guardarlos como +54 11 ...)."""
+    d = re.sub(r"\D", "", tel or "")
+    if not d:
+        return ""
+    if d.startswith("0"):
+        d = d.lstrip("0")
+    if not d.startswith("54"):
+        d = "54" + d
+    if not d.startswith("549"):
+        d = "549" + d[2:]
+    return d
+
+def medio_pendiente(o):
+    nombre = (o.get("gateway_name") or "").strip()
+    n = nombre.lower()
+    if "transfer" in n:
+        tipo = "transferencia"
+    elif "efectivo" in n:
+        tipo = "efectivo"
+    else:
+        tipo = "otro"
+    return tipo, nombre
+
+def _db():
+    import psycopg2
+    return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+
+@app.route("/pendientes")
+def pendientes():
+    """Pedidos abiertos con pago pendiente de los últimos 30 días, con lo necesario para
+    escribirles por WhatsApp y el estado guardado (descartado / reclamado_en)."""
+    if not STORE_ID or not ACCESS_TOKEN:
+        return jsonify({"ok": False, "error": "Credenciales TN no configuradas"}), 500
+
+    desde = (datetime.now(TZ_AR) - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00-03:00")
+    orders, page = [], 1
+    while True:
+        try:
+            r = requests.get(f"{BASE_URL}/orders", headers=TN_HEADERS,
+                             params={"page": page, "per_page": 200, "status": "open",
+                                     "payment_status": "pending", "created_at_min": desde}, timeout=20)
+            r.raise_for_status()
+            batch = r.json()
+        except Exception as e:
+            print(f"[ERROR] TN pendientes página {page}: {e}")
+            return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
+        if not batch: break
+        orders.extend(batch)
+        if len(batch) < 200: break
+        page += 1
+
+    estado = {}
+    if DATABASE_URL and orders:
+        conn = None
+        try:
+            conn = _db()
+            with conn.cursor() as cur:
+                cur.execute("SELECT orden_id, descartado, reclamado_en FROM pendientes_pago WHERE orden_id = ANY(%s)",
+                            ([int(o["id"]) for o in orders],))
+                for oid, desc, recl in cur.fetchall():
+                    estado[oid] = (desc, recl.isoformat() if recl else None)
+        except Exception as e:
+            print(f"[WARN] pendientes_pago: {e}")
+        finally:
+            if conn: conn.close()
+
+    lista = []
+    for o in orders:
+        cliente = o.get("customer") or {}
+        tel = o.get("contact_phone") or cliente.get("phone") or ""
+        tipo, medio = medio_pendiente(o)
+        desc, recl = estado.get(int(o["id"]), (False, None))
+        lista.append({
+            "id": o["id"],
+            "numero": o.get("number"),
+            "creado": o.get("created_at"),
+            "total": safe_float(o.get("total")),
+            "nombre": (o.get("contact_name") or cliente.get("name") or "").strip(),
+            "telefono": tel,
+            "whatsapp": whatsapp_ar(tel),
+            "medio": medio,
+            "medio_tipo": tipo,
+            "productos": [p.get("name") for p in o.get("products") or []],
+            "descartado": desc,
+            "reclamado_en": recl,
+        })
+    lista.sort(key=lambda x: x["creado"] or "", reverse=True)
+    return jsonify({"ok": True, "pendientes": lista})
+
+@app.route("/pendientes/<int:orden_id>", methods=["POST"])
+def pendiente_accion(orden_id):
+    """accion: descartar | restaurar | reclamado"""
+    body = request.get_json(silent=True) or {}
+    accion = body.get("accion")
+    sets = {
+        "descartar": "descartado = true",
+        "restaurar": "descartado = false",
+        "reclamado": "reclamado_en = now()",
+    }.get(accion)
+    if not sets:
+        return jsonify({"ok": False, "error": "accion inválida"}), 400
+    if not DATABASE_URL:
+        return jsonify({"ok": False, "error": "Sin base de datos"}), 500
+    conn = None
+    try:
+        conn = _db()
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO pendientes_pago (orden_id, numero) VALUES (%s, %s) "
+                "ON CONFLICT (orden_id) DO NOTHING", (orden_id, body.get("numero")))
+            cur.execute(f"UPDATE pendientes_pago SET {sets}, actualizado = now() WHERE orden_id = %s",
+                        (orden_id,))
+    except Exception as e:
+        print(f"[ERROR] pendientes_pago {orden_id}: {e}")
+        return jsonify({"ok": False, "error": "No se pudo guardar"}), 500
+    finally:
+        if conn: conn.close()
+    return jsonify({"ok": True})
+
+
 @app.route("/ping")
 def ping():
     return jsonify({"ok": True, "msg": "Hechizo ventas service v3 running"})
