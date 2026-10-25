@@ -427,7 +427,7 @@ def pendientes():
     return jsonify({"ok": True, "pendientes": lista, "feriados": feriados_ar()})
 
 # Feriados nacionales (incluye puentes no laborables) para el plazo de pago en horas
-# hábiles. Fuente: ArgentinaDatos; se guardan un día. Si falla, la app cuenta solo fines de semana.
+# hábiles. Fuente: ArgentinaDatos; se piden una vez por mes (no hace falta más). Si falla, la app cuenta solo fines de semana.
 _feriados = {"hasta": 0, "fechas": []}
 
 def feriados_ar():
@@ -445,7 +445,7 @@ def feriados_ar():
         except Exception as e:
             print(f"[WARN] feriados {a}: {e}")
     if fechas:
-        _feriados.update(hasta=time.time() + 86400, fechas=sorted(set(fechas)))
+        _feriados.update(hasta=time.time() + 30 * 86400, fechas=sorted(set(fechas)))
     return _feriados["fechas"]
 
 def _tn_ordenes(params):
