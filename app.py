@@ -418,22 +418,37 @@ def pendientes():
         return jsonify({"ok": False, "error": "Credenciales TN no configuradas"}), 500
 
     desde = (datetime.now(TZ_AR) - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00-03:00")
+    orders = _tn_ordenes({"status": "open", "payment_status": "pending", "created_at_min": desde})
+    if orders is None:
+        return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
+    estado = _estado_seguimiento(orders)
+    lista = [_fila_pendiente(o, estado) for o in orders]
+    lista.sort(key=lambda x: x["creado"] or "", reverse=True)
+    return jsonify({"ok": True, "pendientes": lista})
+
+def _tn_ordenes(params):
+    """Todas las páginas de /orders con esos filtros; None si TN falla. TN responde 404
+    cuando la página pedida ya no tiene resultados."""
     orders, page = [], 1
     while True:
         try:
             r = requests.get(f"{BASE_URL}/orders", headers=TN_HEADERS,
-                             params={"page": page, "per_page": 200, "status": "open",
-                                     "payment_status": "pending", "created_at_min": desde}, timeout=20)
+                             params={**params, "page": page, "per_page": 200}, timeout=30)
+            if r.status_code == 404 and page > 1:
+                break
             r.raise_for_status()
             batch = r.json()
         except Exception as e:
-            print(f"[ERROR] TN pendientes página {page}: {e}")
-            return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
+            print(f"[ERROR] TN órdenes página {page}: {e}")
+            return None
         if not batch: break
         orders.extend(batch)
         if len(batch) < 200: break
         page += 1
+    return orders
 
+def _estado_seguimiento(orders):
+    """{orden_id: (descartado, reclamado_en)} desde la tabla pendientes_pago."""
     estado = {}
     if DATABASE_URL and orders:
         conn = None
@@ -448,31 +463,108 @@ def pendientes():
             print(f"[WARN] pendientes_pago: {e}")
         finally:
             if conn: conn.close()
+    return estado
 
+def _fila_pendiente(o, estado):
+    cliente = o.get("customer") or {}
+    tel = o.get("contact_phone") or cliente.get("phone") or ""
+    tipo, medio = medio_pendiente(o)
+    desc, recl = estado.get(int(o["id"]), (False, None))
+    return {
+        "id": o["id"],
+        "numero": o.get("number"),
+        "creado": o.get("created_at"),
+        "total": safe_float(o.get("total")),
+        "nombre": (o.get("contact_name") or cliente.get("name") or "").strip(),
+        "telefono": tel,
+        "whatsapp": whatsapp_ar(tel),
+        "medio": medio,
+        "medio_tipo": tipo,
+        # unpacked = sin empaquetar; unshipped = empaquetado (en efectivo: listo para retirar)
+        "preparacion": o.get("shipping_status"),
+        "productos": [p.get("name") for p in o.get("products") or []],
+        "descartado": desc,
+        "reclamado_en": recl,
+    }
+
+# Fecha en que cada pedido pasó a "listo para retirar". No cambia, así que se guarda en
+# memoria y solo se le pide a TN la de los pedidos nuevos.
+_listo_desde = {}
+
+def _fecha_listo(orden_id):
+    try:
+        r = requests.get(f"{BASE_URL}/orders/{orden_id}/fulfillment-orders", headers=TN_HEADERS, timeout=20)
+        r.raise_for_status()
+        fechas = []
+        for fo in r.json() or []:
+            for h in fo.get("status_history") or []:
+                if h.get("to_status") == "READY_FOR_PICKUP" and h.get("happened_at"):
+                    fechas.append(h["happened_at"])
+            if not fechas and fo.get("fulfilled_at"):
+                fechas.append(fo["fulfilled_at"])
+        return max(fechas) if fechas else None
+    except Exception as e:
+        print(f"[WARN] fulfillment-orders {orden_id}: {e}")
+        return None
+
+CAMPOS_RETIRAR = ("id,number,status,payment_status,shipping_status,shipping_pickup_type,created_at,"
+                  "updated_at,total,contact_name,contact_phone,gateway_name")  # sin productos: no se muestran
+
+@app.route("/pendientes/retirar")
+def pendientes_retirar():
+    """Pedidos pagados para retirar por el showroom que están empaquetados y sin retirar
+    (últimos 60 días), con la fecha desde la que están listos. Muchos ya se retiraron
+    pero nunca se marcaron en TN: por eso la ventana corta."""
+    if not STORE_ID or not ACCESS_TOKEN:
+        return jsonify({"ok": False, "error": "Credenciales TN no configuradas"}), 500
+    desde = (datetime.now(TZ_AR) - timedelta(days=60)).strftime("%Y-%m-%dT00:00:00-03:00")
+    # 2 meses son ~500 pedidos: solo los campos que se usan y las páginas en paralelo
+    # (de a una y completos tardaba ~20 s)
+    from concurrent.futures import ThreadPoolExecutor
+    params = {"status": "open", "created_at_min": desde, "fields": CAMPOS_RETIRAR}
+    def _pagina(n):
+        try:
+            r = requests.get(f"{BASE_URL}/orders", headers=TN_HEADERS,
+                             params={**params, "page": n, "per_page": 200}, timeout=30)
+            if r.status_code == 404:
+                return []
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            print(f"[ERROR] TN retirar página {n}: {e}")
+            return None
+    orders, desde_pag = [], 1
+    while True:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            paginas = list(ex.map(_pagina, range(desde_pag, desde_pag + 4)))
+        if any(p is None for p in paginas):
+            return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
+        for p in paginas:
+            orders.extend(p)
+        if len(paginas[-1]) < 200:
+            break
+        desde_pag += 4
+    # Los que todavía no pagaron (efectivo) ya aparecen arriba, en pendientes de pago
+    orders = [o for o in orders if o.get("shipping_pickup_type") == "pickup"
+              and o.get("shipping_status") == "unshipped"
+              and o.get("payment_status") in ("paid", "authorized")]
+
+    faltan = [o["id"] for o in orders if o["id"] not in _listo_desde]
+    if faltan:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for oid, fecha in zip(faltan, ex.map(_fecha_listo, faltan)):
+                if fecha:
+                    _listo_desde[oid] = fecha
+
+    estado = _estado_seguimiento(orders)
     lista = []
     for o in orders:
-        cliente = o.get("customer") or {}
-        tel = o.get("contact_phone") or cliente.get("phone") or ""
-        tipo, medio = medio_pendiente(o)
-        desc, recl = estado.get(int(o["id"]), (False, None))
-        lista.append({
-            "id": o["id"],
-            "numero": o.get("number"),
-            "creado": o.get("created_at"),
-            "total": safe_float(o.get("total")),
-            "nombre": (o.get("contact_name") or cliente.get("name") or "").strip(),
-            "telefono": tel,
-            "whatsapp": whatsapp_ar(tel),
-            "medio": medio,
-            "medio_tipo": tipo,
-            # unpacked = sin empaquetar; unshipped = empaquetado (en efectivo: listo para retirar)
-            "preparacion": o.get("shipping_status"),
-            "productos": [p.get("name") for p in o.get("products") or []],
-            "descartado": desc,
-            "reclamado_en": recl,
-        })
-    lista.sort(key=lambda x: x["creado"] or "", reverse=True)
-    return jsonify({"ok": True, "pendientes": lista})
+        fila = _fila_pendiente(o, estado)
+        fila["tipo"] = "retirar"
+        fila["listo_desde"] = _listo_desde.get(o["id"]) or o.get("updated_at")
+        lista.append(fila)
+    return jsonify({"ok": True, "pedidos": lista})
 
 @app.route("/pendientes/<int:orden_id>", methods=["POST"])
 def pendiente_accion(orden_id):
