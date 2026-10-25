@@ -465,6 +465,8 @@ def pendientes():
             "whatsapp": whatsapp_ar(tel),
             "medio": medio,
             "medio_tipo": tipo,
+            # unpacked = sin empaquetar; unshipped = empaquetado (en efectivo: listo para retirar)
+            "preparacion": o.get("shipping_status"),
             "productos": [p.get("name") for p in o.get("products") or []],
             "descartado": desc,
             "reclamado_en": recl,
