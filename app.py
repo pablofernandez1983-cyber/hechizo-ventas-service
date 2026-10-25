@@ -502,6 +502,47 @@ def pendiente_accion(orden_id):
         if conn: conn.close()
     return jsonify({"ok": True})
 
+@app.route("/pendientes/<int:orden_id>/cancelar", methods=["POST"])
+def pendiente_cancelar(orden_id):
+    """Cancela en Tiendanube un pedido que sigue abierto y sin pagar (vuelve el stock, sin
+    mail a la clienta). La app pide confirmar dos veces antes de llamar acá."""
+    if not STORE_ID or not ACCESS_TOKEN:
+        return jsonify({"ok": False, "error": "Credenciales TN no configuradas"}), 500
+    try:
+        r = requests.get(f"{BASE_URL}/orders/{orden_id}", headers=TN_HEADERS, timeout=20)
+        r.raise_for_status()
+        o = r.json()
+    except Exception as e:
+        print(f"[ERROR] TN orden {orden_id}: {e}")
+        return jsonify({"ok": False, "error": "No se pudo leer el pedido en Tiendanube"}), 502
+    # Por seguridad solo se cancela lo que sigue pendiente: si mientras tanto pagó, no se toca
+    if o.get("status") != "open" or o.get("payment_status") != "pending":
+        return jsonify({"ok": False, "error": f"El pedido ya no está pendiente ({o.get('status')}/{o.get('payment_status')})"}), 409
+
+    r = requests.post(f"{BASE_URL}/orders/{orden_id}/cancel", headers=TN_HEADERS,
+                      json={"reason": "customer", "email": False, "restock": True}, timeout=30)
+    if r.status_code >= 400:
+        print(f"[ERROR] TN cancelar {orden_id}: {r.status_code} {r.text[:300]}")
+        if r.status_code in (401, 403):
+            return jsonify({"ok": False, "error": "La clave de Tiendanube no tiene permiso para cancelar pedidos"}), 502
+        return jsonify({"ok": False, "error": f"Tiendanube rechazó la cancelación ({r.status_code})"}), 502
+    print(f"[PENDIENTES] Cancelado pedido #{o.get('number')} ({orden_id})")
+
+    if DATABASE_URL:
+        conn = None
+        try:
+            conn = _db()
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO pendientes_pago (orden_id, numero, cancelado_en) VALUES (%s, %s, now()) "
+                    "ON CONFLICT (orden_id) DO UPDATE SET cancelado_en = now(), actualizado = now()",
+                    (orden_id, o.get("number")))
+        except Exception as e:
+            print(f"[WARN] pendientes_pago cancelado {orden_id}: {e}")
+        finally:
+            if conn: conn.close()
+    return jsonify({"ok": True})
+
 
 @app.route("/ping")
 def ping():
