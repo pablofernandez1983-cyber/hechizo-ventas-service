@@ -474,13 +474,14 @@ def pendientes():
 
 @app.route("/pendientes/<int:orden_id>", methods=["POST"])
 def pendiente_accion(orden_id):
-    """accion: descartar | restaurar | reclamado"""
+    """accion: descartar | restaurar | reclamado | no_reclamado"""
     body = request.get_json(silent=True) or {}
     accion = body.get("accion")
     sets = {
         "descartar": "descartado = true",
         "restaurar": "descartado = false",
         "reclamado": "reclamado_en = now()",
+        "no_reclamado": "reclamado_en = null",
     }.get(accion)
     if not sets:
         return jsonify({"ok": False, "error": "accion inválida"}), 400
