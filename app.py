@@ -680,15 +680,26 @@ def pedido_por_numero(numero):
     if not o:
         return jsonify({"ok": False, "error": f"No existe el pedido #{numero}"}), 404
     fila = _fila_pendiente(o, {})
-    dire = o.get("shipping_address") or {}
+    # En envíos a sucursal la dirección de envío viene "No informado" y el envío como
+    # "Punto de retiro": lo real está en shipping_pickup_details
+    retiro = o.get("shipping_pickup_details") or {}
+    dire = retiro.get("address") or o.get("shipping_address") or {}
     calle = " ".join(str(dire.get(k) or "").strip() for k in ("address", "number")).strip()
     # Localidad, ciudad y provincia suelen repetirse ("Capital Federal, Capital Federal")
     lugar = ", ".join(dict.fromkeys(x for x in (str(dire.get(k) or "").strip()
                                                 for k in ("locality", "city", "province")) if x))
+    # Si el envío fue gratis para la clienta, el costo real lo pagó Hechizo
+    costo = safe_float(o.get("shipping_cost_customer")) or safe_float(o.get("shipping_cost_owner"))
     fila.update({
         "tipo": "devuelto",
-        "envio": (o.get("shipping_option") or "").strip(),
-        "direccion": ", ".join(x for x in (calle, (dire.get("floor") or "").strip(), lugar) if x),
+        "destinataria": ((o.get("shipping_address") or {}).get("name") or "").strip() or fila["nombre"],
+        "envio": (retiro.get("name") or o.get("shipping_option") or "").strip(),
+        "direccion": ", ".join(x for x in (calle, str(dire.get("floor") or "").strip(), lugar) if x),
+        "seguimiento": o.get("shipping_tracking_number") or "",
+        "seguimiento_url": o.get("shipping_tracking_url") or "",
+        "envio_costo": round(costo, 2),
+        "despachado": o.get("shipped_at"),
+        "contenido": [f'{p.get("name")} ×{p.get("quantity")}' for p in o.get("products") or []],
         "estado": o.get("status"),
         "pago": o.get("payment_status"),
     })
