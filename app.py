@@ -5,6 +5,7 @@ Hechizo Bijou - Servicio de Ventas v3
                      (tabla 'ventas'/'ventas_detalle'). Sin pendientes_mes (ver /ventas/mes).
 - GET /ventas/mes → lento: trae todo el mes de Tiendanube y devuelve pendientes_mes.
                      Pensado para llamarse en paralelo con /ventas, sin bloquearlo.
+- GET /pedido/<numero> → un pedido por su número (pantalla "Pedido devuelto" de la app)
 - GET /ping    → health check
 
 El upsert a Supabase usa la misma tabla/esquema que hechizo-reporte-nuevo (que la
@@ -659,6 +660,39 @@ def pendiente_cancelar(orden_id):
         finally:
             if conn: conn.close()
     return jsonify({"ok": True})
+
+
+@app.route("/pedido/<int:numero>")
+def pedido_por_numero(numero):
+    """Busca un pedido por su número (#) para escribirle a la clienta, p. ej. cuando el
+    correo lo devolvió. TN busca con q= por número, nombre o mail: se filtra el exacto."""
+    if not STORE_ID or not ACCESS_TOKEN:
+        return jsonify({"ok": False, "error": "Credenciales TN no configuradas"}), 500
+    try:
+        r = requests.get(f"{BASE_URL}/orders", headers=TN_HEADERS, params={"q": str(numero)}, timeout=30)
+        if r.status_code == 404:
+            return jsonify({"ok": False, "error": f"No existe el pedido #{numero}"}), 404
+        r.raise_for_status()
+        o = next((x for x in r.json() if x.get("number") == numero), None)
+    except Exception as e:
+        print(f"[ERROR] TN pedido #{numero}: {e}")
+        return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
+    if not o:
+        return jsonify({"ok": False, "error": f"No existe el pedido #{numero}"}), 404
+    fila = _fila_pendiente(o, {})
+    dire = o.get("shipping_address") or {}
+    calle = " ".join(str(dire.get(k) or "").strip() for k in ("address", "number")).strip()
+    # Localidad, ciudad y provincia suelen repetirse ("Capital Federal, Capital Federal")
+    lugar = ", ".join(dict.fromkeys(x for x in (str(dire.get(k) or "").strip()
+                                                for k in ("locality", "city", "province")) if x))
+    fila.update({
+        "tipo": "devuelto",
+        "envio": (o.get("shipping_option") or "").strip(),
+        "direccion": ", ".join(x for x in (calle, (dire.get("floor") or "").strip(), lugar) if x),
+        "estado": o.get("status"),
+        "pago": o.get("payment_status"),
+    })
+    return jsonify({"ok": True, "pedido": fila})
 
 
 @app.route("/ping")

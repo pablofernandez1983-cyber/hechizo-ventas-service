@@ -19,6 +19,7 @@ API Flask que devuelve las ventas de hoy/ayer de Tiendanube en tiempo real para 
 | `POST /pendientes/<orden_id>` | `{accion: descartar\|restaurar\|reclamado\|no_reclamado, numero}` → upsert en `pendientes_pago` (Supabase). Lo usa la pantalla "Pendientes de pago" de la app |
 | `GET /pendientes/retirar` | Pedidos pagados para retiro en showroom, empaquetados y sin retirar (últimos 60 días), con `listo_desde` (status_history READY_FOR_PICKUP de `/orders/{id}/fulfillment-orders`, cacheado en memoria). Páginas en paralelo y `fields` reducidos (~5 s; ~11 s la primera vez) |
 | `POST /pendientes/<orden_id>/cancelar` | Cancela en TN (`reason=customer`, `restock=true`, sin mail) **solo si sigue open + pending** (si no, 409); guarda `cancelado_en`. La app pide confirmar dos veces |
+| `GET /pedido/<numero>` | Busca un pedido por su número (TN `/orders?q=`, filtra el exacto) con contacto, WhatsApp, envío y dirección. Lo usa "Pedido devuelto" en la app para avisarle a la clienta que el correo lo devolvió |
 | `GET /ping` | Health check (única ruta abierta; el resto exige header `X-Web-Key` = `WEB_PASSWORD`) |
 
 ## Actualizaciones automáticas (`_horario_loop`, hora Argentina)
