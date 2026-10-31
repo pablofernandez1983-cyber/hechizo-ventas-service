@@ -741,8 +741,14 @@ def _llamar_reporte(metodo, ruta, timeout):
 TAREAS = {
     "ventas":     _sincronizar_tn_background,
     "stock":      lambda: _llamar_reporte("GET", "/stock-data?refresh=1", 240),
-    "resultados": lambda: _llamar_reporte("POST", "/ejecutar", 120),  # 409 = ya estaba corriendo
+    "resultados": lambda: _llamar_reporte("POST", _ruta_resultados(), 120),  # 409 = ya estaba corriendo
 }
+
+def _ruta_resultados():
+    # El reporte solo manda a Supabase las órdenes de los últimos 30 días; los domingos
+    # a la mañana reescribe todas, por si alguna corrida falló o se corrigió el caché.
+    ahora = datetime.now(TZ_AR)
+    return "/ejecutar?completo=1" if ahora.weekday() == 6 and ahora.hour < 12 else "/ejecutar"
 
 def _horario_loop():
     hechos = set()
