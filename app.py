@@ -716,6 +716,7 @@ def ping():
 # El reporte (hechizo-reporte-nuevo) se duerme por inactividad: la llamada lo despierta.
 REPORTE_URL = os.environ.get("REPORTE_URL", "https://hechizo-reporte-nuevo-production.up.railway.app")
 HORARIO = {
+    7:  ["envios"],    # paquetes del Correo en sucursal (mails si están activados)
     8:  ["ventas"],
     10: ["resultados"],
     11: ["ventas"],
@@ -742,6 +743,7 @@ TAREAS = {
     "ventas":     _sincronizar_tn_background,
     "stock":      lambda: _llamar_reporte("GET", "/stock-data?refresh=1", 240),
     "resultados": lambda: _llamar_reporte("POST", "/ejecutar", 120),  # 409 = ya estaba corriendo
+    "envios":     lambda: _llamar_reporte("POST", "/envios/revisar", 120),
 }
 
 def _horario_loop():
