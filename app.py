@@ -112,9 +112,18 @@ def es_moto(medio_env):
         "entrega rapida", "entrega rápida", "epick", "e-pick",
     ))
 
+def carrier_de(tracking, medio_env):
+    """Transportista de un pedido (misma regla que hechizo-reporte-nuevo)."""
+    t = str(tracking or "").strip()
+    if t.startswith("36000"): return "andreani"
+    if t.startswith("1978"):  return "correo"
+    if es_moto(medio_env):    return "moto"
+    return "otro"
+
 def guardar_ventas_supabase(orders):
-    """Upsertea a Supabase (tablas 'ventas'/'ventas_detalle'), mismo esquema que usa
-    hechizo-reporte-nuevo. Escritura idempotente — no rompe nada si se llama seguido
+    """Upsertea a Supabase (tablas 'ventas'/'ventas_detalle'), mismo esquema y mismas reglas
+    que guardar_ventas_db / guardar_ventas_detalle_db de hechizo-reporte-nuevo (si se cambia
+    una, cambiar la otra). Escritura idempotente — no rompe nada si se llama seguido
     ni si corre en paralelo con el reporte completo (mismos datos, misma clave)."""
     if not DATABASE_URL or not orders:
         return
@@ -125,12 +134,14 @@ def guardar_ventas_supabase(orders):
         print(f"[WARN] psycopg2 no disponible: {e}")
         return
 
-    rows_ventas, rows_detalle = [], []
+    rows_ventas, detalle, excluidas = [], {}, []
     for o in orders:
-        if o.get("status") == "cancelled": continue
-        if o.get("payment_status") not in ("paid", "authorized"): continue
         orden_id = o.get("id")
         if not orden_id: continue
+        # canceladas / sin pagar: no deben quedar en ventas aunque antes estuvieran pagas
+        if o.get("status") == "cancelled" or o.get("payment_status") not in ("paid", "authorized"):
+            excluidas.append(int(orden_id))
+            continue
         try:
             dt = datetime.fromisoformat(
                 o.get("created_at", "").replace("Z", "+00:00")
@@ -139,12 +150,7 @@ def guardar_ventas_supabase(orders):
             continue
 
         shipping_cust = safe_float(o.get("shipping_cost_customer", 0))
-        tracking  = str(o.get("shipping_tracking_number", "") or "").lower()
-        medio_env = str(o.get("shipping_option", "") or "").lower()
-        if "36000" in tracking:       carrier = "andreani"
-        elif es_moto(medio_env):      carrier = "moto"
-        elif "1978" in tracking:      carrier = "correo"
-        else:                         carrier = "otro"
+        carrier = carrier_de(o.get("shipping_tracking_number"), o.get("shipping_option"))
         is_may = es_mayorista(o)
         customer = o.get("customer") or {}
         rows_ventas.append((
@@ -156,6 +162,7 @@ def guardar_ventas_supabase(orders):
             o.get("payment_status", ""), o.get("shipping_status", ""),
             str(o.get("gateway_name", "") or o.get("gateway", "")),
             str(o.get("shipping_tracking_number", "") or ""),
+            dt,
         ))
 
         for p in (o.get("products") or []):
@@ -166,15 +173,22 @@ def guardar_ventas_supabase(orders):
                 str(v.get("es") or v.get("en") or v.get("pt") or (list(v.values())[0] if v else ""))
                 for v in variant_values if isinstance(v, dict)
             )
-            rows_detalle.append((
+            cantidad = int(p.get("quantity") or 0)
+            clave = (orden_id, variante_id)
+            if clave in detalle:          # dos líneas de la misma variante: se suman
+                detalle[clave][9] += cantidad
+                continue
+            detalle[clave] = [
                 orden_id, dt.date(), dt.year, dt.month,
                 p.get("product_id"), variante_id,
                 p.get("name", "") or "", variante_nombre,
-                p.get("sku", "") or "", int(p.get("quantity") or 0),
+                p.get("sku", "") or "", cantidad,
                 float(p.get("price") or 0),
-            ))
+            ]
 
-    if not rows_ventas:
+    rows_detalle = [tuple(f) for f in detalle.values()]
+    ids_pagas = [int(r[0]) for r in rows_ventas]
+    if not rows_ventas and not excluidas:
         return
 
     conn = None
@@ -185,22 +199,26 @@ def guardar_ventas_supabase(orders):
                 INSERT INTO ventas
                     (orden_id, fecha, anio, mes, cliente, email,
                      subtotal, descuento, envio_cobrado, total,
-                     tipo, carrier, estado_pago, estado_envio, medio_pago, tracking)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     tipo, carrier, estado_pago, estado_envio, medio_pago, tracking, creada)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (orden_id) DO UPDATE SET
                     subtotal=EXCLUDED.subtotal, descuento=EXCLUDED.descuento,
                     envio_cobrado=EXCLUDED.envio_cobrado, total=EXCLUDED.total,
                     tipo=EXCLUDED.tipo, carrier=EXCLUDED.carrier,
                     estado_pago=EXCLUDED.estado_pago, estado_envio=EXCLUDED.estado_envio,
-                    tracking=EXCLUDED.tracking
+                    tracking=EXCLUDED.tracking, creada=EXCLUDED.creada
             """, rows_ventas, page_size=200)
+            # El detalle se reemplaza entero por orden: si el pedido se editó quedan las
+            # cantidades e ítems actuales. Las canceladas/impagas se borran.
+            cur.execute("DELETE FROM ventas_detalle WHERE orden_id = ANY(%s)", (ids_pagas + excluidas,))
+            if excluidas:
+                cur.execute("DELETE FROM ventas WHERE orden_id = ANY(%s)", (excluidas,))
             if rows_detalle:
                 psycopg2.extras.execute_batch(cur, """
                     INSERT INTO ventas_detalle
                         (orden_id, fecha, anio, mes, producto_id, variante_id,
                          producto_nombre, variante_nombre, sku, cantidad, precio_unitario)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (orden_id, variante_id) DO NOTHING
                 """, rows_detalle, page_size=200)
         conn.commit()
         print(f"[INFO] Supabase: {len(rows_ventas)} ventas, {len(rows_detalle)} detalle upserteadas")
@@ -258,11 +276,20 @@ def get_orders_resumen_tn(dias=1):
         page += 1
     return orders, False
 
-def _sincronizar_tn_background():
-    """Baja los pedidos completos de los últimos días y los persiste en Supabase."""
-    orders_tn, tn_error = get_orders_tn(days=3)
-    if not tn_error:
-        _persistir_orden_tn(orders_tn)
+SYNC_MIN_SEG = 300
+_sync = {"ultimo": 0.0, "lock": threading.Lock()}
+
+def _sincronizar_tn_background(forzar=True):
+    """Baja los pedidos completos de los últimos días y los persiste en Supabase.
+    forzar=False (la app al abrirse): no repite si ya se bajó hace menos de 5 minutos.
+    forzar=True (botón Actualizar, horario): baja siempre."""
+    with _sync["lock"]:   # de a una: dos bajadas a la vez escribirían lo mismo
+        if not forzar and time.time() - _sync["ultimo"] < SYNC_MIN_SEG:
+            return
+        orders_tn, tn_error = get_orders_tn(days=3)
+        if not tn_error:
+            _persistir_orden_tn(orders_tn)
+            _sync["ultimo"] = time.time()
 
 def _persistir_orden_tn(orders_tn):
     """Guarda en Supabase. Corre en background, después de responder /ventas."""
@@ -338,8 +365,10 @@ def ventas():
     if tn_error:
         return jsonify({"ok": False, "error": "Error al conectar con TiendaNube"}), 502
 
-    # 2. Bajar los pedidos completos y persistir en Supabase en background.
-    threading.Thread(target=_sincronizar_tn_background, daemon=True).start()
+    # 2. Bajar los pedidos completos y persistir en Supabase en background. Al abrir la app,
+    #    como mucho una vez cada 5 minutos; con ?refrescar=1 (botón Actualizar) siempre.
+    forzar = request.args.get("refrescar") == "1"
+    threading.Thread(target=_sincronizar_tn_background, kwargs={"forzar": forzar}, daemon=True).start()
 
     # 3. Calcular resumen hoy/ayer y pendientes de esos mismos días
     acum, hoy_str, ayer_str = calcular_resumen(orders_tn)

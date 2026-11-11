@@ -13,7 +13,7 @@ API Flask que devuelve las ventas de hoy/ayer de Tiendanube en tiempo real para 
 
 | Ruta | Descripción |
 |------|-------------|
-| `GET /ventas` | Rápido (~1 s): hoy/ayer con una consulta liviana a TN (creados desde ayer, solo 6 campos); en background baja los últimos 3 días completos y los upsertea a Supabase |
+| `GET /ventas` | Rápido (~1 s): hoy/ayer con una consulta liviana a TN (creados desde ayer, solo 6 campos); en background baja los últimos 3 días completos y los upsertea a Supabase (al abrir la app, como mucho una vez cada 5 min; con `?refrescar=1` — botón Actualizar ventas — siempre). El guardado sigue las mismas reglas que el reporte: borra canceladas/impagas, graba `creada` y reemplaza el detalle de cada orden |
 | `GET /ventas/mes` | Lento (todo el mes): devuelve `pendientes_mes`. Se llama en paralelo con `/ventas`, no lo bloquea |
 | `GET /pendientes` | Pedidos abiertos con pago pendiente de los últimos 30 días (TN filtra `payment_status=pending`), con teléfono normalizado para wa.me (549…) y el estado de la tabla `pendientes_pago` |
 | `POST /pendientes/<orden_id>` | `{accion: descartar\|restaurar\|reclamado\|no_reclamado, numero}` → upsert en `pendientes_pago` (Supabase). Lo usa la pantalla "Pendientes de pago" de la app |
