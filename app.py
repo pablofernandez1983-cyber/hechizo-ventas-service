@@ -110,6 +110,8 @@ def es_moto(medio_env):
     return any(x in m for x in (
         "mot", "mensajer", "mile",
         "entrega rapida", "entrega rápida", "epick", "e-pick",
+        # oct-2026: TN lo renombró a "Envio Nube - Entrega a domicilio" (sigue siendo Epick)
+        "entrega a domicilio",
     ))
 
 def carrier_de(tracking, medio_env):
